@@ -91,6 +91,7 @@ export function createPairRoutes(pairs: Map<string, Pair>, io: SocketServer): Ro
         },
         analyses: [],
         implementation: null,
+        sessionId: null,
         attachments: [],
       },
     };
@@ -240,6 +241,8 @@ export function createPairRoutes(pairs: Map<string, Pair>, io: SocketServer): Ro
 
     pair.left.messages = [];
     pair.left.sessionId = null;
+    pair.right.sessionId = null;
+    pair.right.analyses = [];
     pair.status = 'idle';
     pair.updatedAt = new Date().toISOString();
     savePair(pair);

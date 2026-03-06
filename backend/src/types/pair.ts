@@ -59,6 +59,7 @@ export interface Pair {
     agent: AgentConfig;
     analyses: Analysis[];
     implementation: string | null;
+    sessionId: string | null;
     attachments: Attachment[];
   };
 }

@@ -259,6 +259,7 @@ interface ClaudeChatOptions {
   prompt: string;
   sessionId: string | null;
   pairId: string;
+  socketEvent?: string;
   io: SocketServer;
   onComplete: (fullText: string, sessionId: string) => void;
   onError: (error: string) => void;
@@ -308,6 +309,8 @@ export function callClaudeChat(options: ClaudeChatOptions): ChildProcess {
 
   proc.stdin!.write(options.prompt);
   proc.stdin!.end();
+
+  const streamEvent = options.socketEvent || `stream:left:${options.pairId}`;
 
   let fullText = '';
   let capturedSessionId = options.sessionId || '';
@@ -369,7 +372,7 @@ export function callClaudeChat(options: ClaudeChatOptions): ChildProcess {
               const delta = currentText.slice(lastSeenText.length);
               lastSeenText = currentText;
               fullText += delta; // Append (not replace) to accumulate across turns
-              options.io.emit(`stream:left:${options.pairId}`, { type: 'text', text: delta });
+              options.io.emit(streamEvent, { type: 'text', text: delta });
             }
           }
 
@@ -380,11 +383,11 @@ export function callClaudeChat(options: ClaudeChatOptions): ChildProcess {
             if (block.type === 'tool_use') {
               const toolEvent = { type: 'tool_use' as const, tool: block.name as string, input: JSON.stringify(block.input || '') };
               toolEvents.push(toolEvent);
-              options.io.emit(`stream:left:${options.pairId}`, toolEvent);
+              options.io.emit(streamEvent, toolEvent);
             } else {
               const toolEvent = { type: 'tool_result' as const, content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content || '') };
               toolEvents.push(toolEvent);
-              options.io.emit(`stream:left:${options.pairId}`, toolEvent);
+              options.io.emit(streamEvent, toolEvent);
             }
           }
           seenToolCount = toolBlocks.length;
@@ -503,19 +506,21 @@ export async function runAnalysis(pair: Pair, io: SocketServer): Promise<void> {
   io.emit(`status:${pair.id}`, { status: 'analyzing' });
 
   const analysisOutput = await new Promise<string>((resolve, reject) => {
-    callClaude({
+    callClaudeChat({
       cwd: pair.projectDir,
       annexDirs: pair.annexDirs,
       model: pair.right.agent.model,
       systemPrompt: 'Tu es un analyste technique senior. Le PRD complet t\'est fourni directement dans le message. Analyse-le en profondeur. Tu peux explorer le codebase pour verifier la faisabilite. NE CODE PAS, ne modifie aucun fichier.',
-      useAppendSystemPrompt: false,
       allowedTools: ['Read', 'Glob', 'Grep'],
       prompt,
+      sessionId: pair.right.sessionId,
       pairId: pair.id,
       socketEvent: `stream:right:${pair.id}`,
-      eventMeta: { phase: 'analysis' },
       io,
-      onComplete: resolve,
+      onComplete: (fullText, sessionId) => {
+        pair.right.sessionId = sessionId;
+        resolve(fullText);
+      },
       onError: reject,
     });
   });
@@ -617,19 +622,21 @@ export async function runAutoLoop(pair: Pair, io: SocketServer, rounds: number):
     loopPrompt += `---\n\n[CONSIGNE]\nLa conversation et les fichiers references ci-dessus contiennent le PRD complet.\nAnalyse le PRD en profondeur : points forts, points a ameliorer, problemes potentiels, manques.\nTu peux aussi explorer le codebase pour verifier la coherence avec le code existant.\nNE CODE PAS.`;
 
     const analysisOutput = await new Promise<string>((resolve, reject) => {
-      callClaude({
+      callClaudeChat({
         cwd: pair.projectDir,
         annexDirs: pair.annexDirs,
         model: pair.right.agent.model,
         systemPrompt: 'Tu es un analyste technique senior. Le PRD complet et les fichiers references te sont fournis dans le message. Analyse en profondeur. Tu peux explorer le codebase pour verifier la faisabilite. NE CODE PAS, ne modifie aucun fichier.',
-        useAppendSystemPrompt: false,
         allowedTools: ['Read', 'Glob', 'Grep'],
         prompt: loopPrompt,
+        sessionId: pair.right.sessionId,
         pairId: pair.id,
         socketEvent: `stream:right:${pair.id}`,
-        eventMeta: { phase: 'analysis' },
         io,
-        onComplete: resolve,
+        onComplete: (fullText, sessionId) => {
+          pair.right.sessionId = sessionId;
+          resolve(fullText);
+        },
         onError: reject,
       });
     });
@@ -761,19 +768,21 @@ export async function runScoringLoop(pair: Pair, io: SocketServer): Promise<void
     loopPrompt += `---\n\n[CONSIGNE]\nAnalyse le PRD en profondeur : points forts, points a ameliorer, problemes potentiels, manques.\nTu peux explorer le codebase pour verifier la coherence avec le code existant.\nNE CODE PAS.\n\nIMPORTANT: Termine TOUJOURS ton analyse par un score global sur 10 au format exact:\nScore final : X/10\n\nUn score >= 9/10 signifie que le PRD est pret pour l'implementation.`;
 
     const analysisOutput = await new Promise<string>((resolve, reject) => {
-      callClaude({
+      callClaudeChat({
         cwd: pair.projectDir,
         annexDirs: pair.annexDirs,
         model: pair.right.agent.model,
         systemPrompt: 'Tu es un analyste technique senior. Le PRD complet et les fichiers references te sont fournis dans le message. Analyse en profondeur. Tu peux explorer le codebase pour verifier la faisabilite. NE CODE PAS, ne modifie aucun fichier. Termine TOUJOURS par un score sur 10.',
-        useAppendSystemPrompt: false,
         allowedTools: ['Read', 'Glob', 'Grep'],
         prompt: loopPrompt,
+        sessionId: pair.right.sessionId,
         pairId: pair.id,
         socketEvent: `stream:right:${pair.id}`,
-        eventMeta: { phase: 'analysis' },
         io,
-        onComplete: resolve,
+        onComplete: (fullText, sessionId) => {
+          pair.right.sessionId = sessionId;
+          resolve(fullText);
+        },
         onError: reject,
       });
     });
