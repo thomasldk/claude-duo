@@ -3,6 +3,7 @@ import { usePairStore } from '../stores/pairStore';
 import type { Pair, PairStatus } from '../types/pair';
 import PairForm from './PairForm';
 import SettingsPanel from './SettingsPanel';
+import pkg from '../../package.json';
 
 const STATUS_BADGES: Record<PairStatus, { color: string; label: string; pulse?: boolean }> = {
   idle: { color: 'bg-text-muted', label: 'Idle' },
@@ -67,7 +68,7 @@ export default function Sidebar() {
         {/* Header */}
         <div className="p-3 border-b border-border">
           <h1 className="text-sm font-bold text-accent mb-0">ClaudeDuo</h1>
-          <div className="text-[10px] text-accent/60 mb-2">by TLDK v1.01</div>
+          <div className="text-[10px] text-accent/60 mb-2">by TLDK v{pkg.version}</div>
           <input
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}

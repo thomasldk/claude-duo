@@ -19,7 +19,12 @@ export default function RightPanel({ pair }: Props) {
     isStreaming, uploadAttachment, deleteAttachment,
     errorMessage, errorRetryable, clearError,
     loopRound, loopTotal, loopPhase,
+    scoringHistory,
   } = usePairStore();
+
+  // GO CODER blinks when scoring just reached >= 9
+  const lastScoring = scoringHistory[scoringHistory.length - 1];
+  const scoringReady = lastScoring?.verdict === 'ready';
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const isAnalyzing = pair.status === 'analyzing';
@@ -67,7 +72,11 @@ export default function RightPanel({ pair }: Props) {
           <button
             onClick={() => goCode(pair.id)}
             disabled={otherActive}
-            className="px-3 py-1 bg-success/20 text-success text-xs rounded hover:bg-success/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className={`px-3 py-1 text-xs rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${
+              scoringReady
+                ? 'bg-success text-bg-primary font-bold animate-pulse shadow-lg shadow-success/40'
+                : 'bg-success/20 text-success hover:bg-success/30'
+            }`}
           >
             GO CODER
           </button>

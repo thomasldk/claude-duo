@@ -16,11 +16,12 @@ interface Props {
 export default function LeftPanel({ pair }: Props) {
   const {
     sendMessage, stopPair, resetChat,
-    pushRight, autoLoop,
+    pushRight, autoLoop, scoringLoop,
     leftStreamItems,
     uploadAttachment, deleteAttachment,
     errorMessage, errorRetryable, clearError,
     loopRound, loopTotal, loopPhase,
+    scoringActive, scoringHistory,
   } = usePairStore();
 
   const [inputText, setInputText] = useState('');
@@ -135,6 +136,14 @@ export default function LeftPanel({ pair }: Props) {
               Analyser {'\u27A4'}
             </button>
             <button
+              onClick={() => scoringLoop(pair.id)}
+              disabled={otherActive}
+              className="px-3 py-1 bg-warning/20 text-warning text-xs rounded hover:bg-warning/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              title="Boucle auto avec arret au score >= 9/10"
+            >
+              {'\u2B50'} Scoring
+            </button>
+            <button
               onClick={() => autoLoop(pair.id, loopRounds)}
               disabled={otherActive}
               className="px-3 py-1 bg-purple/20 text-purple text-xs rounded hover:bg-purple/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -160,13 +169,41 @@ export default function LeftPanel({ pair }: Props) {
             {'\u23F9'} Stop
           </button>
         )}
-        {loopPhase && loopPhase !== 'done' && (
+        {loopPhase && loopPhase !== 'done' && !scoringActive && (
           <span className="inline-flex items-center gap-1 text-xs text-purple">
             <span className="spinner spinner-sm" />
             Round {loopRound}/{loopTotal}
           </span>
         )}
+        {scoringActive && (
+          <span className="inline-flex items-center gap-1 text-xs text-warning">
+            <span className="spinner spinner-sm" />
+            Scoring Round {loopRound}
+          </span>
+        )}
       </div>
+
+      {/* Scoring history bar */}
+      {scoringHistory.length > 0 && (
+        <div className="flex items-center gap-1 px-2 py-1 border-b border-border bg-bg-secondary/50 flex-wrap">
+          {scoringHistory.map((h) => {
+            const color = h.score !== null && h.score >= 9 ? 'text-success bg-success/20'
+              : h.score !== null && h.score >= 7 ? 'text-warning bg-warning/20'
+              : 'text-error bg-error/20';
+            return (
+              <span key={h.round} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono ${color}`}>
+                R{h.round}: {h.score !== null ? h.score.toFixed(1) : '?'}/10
+                <span className="text-text-muted">({Math.floor(h.elapsed / 60)}:{(h.elapsed % 60).toString().padStart(2, '0')})</span>
+              </span>
+            );
+          })}
+          {!scoringActive && scoringHistory.length > 0 && (
+            <span className="text-xs text-text-muted ml-1">
+              Total: {Math.floor(scoringHistory.reduce((s, h) => s + h.elapsed, 0) / 60)}:{(scoringHistory.reduce((s, h) => s + h.elapsed, 0) % 60).toString().padStart(2, '0')}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 space-y-3">

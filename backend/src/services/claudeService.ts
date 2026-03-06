@@ -707,6 +707,171 @@ export async function runAutoLoop(pair: Pair, io: SocketServer, rounds: number):
   io.emit(`status:${pair.id}`, { status: 'prd_done' });
 }
 
+/** Extract a score (X/10) from the critic/analysis output */
+export function extractScore(text: string): number | null {
+  // Match patterns like "9/10", "8.5/10", "Score : 7/10", "Score: 8,5/10"
+  const patterns = [
+    /score\s*(?:final|global|:)?\s*[:=]?\s*(\d+(?:[.,]\d+)?)\s*\/\s*10/gi,
+    /(\d+(?:[.,]\d+)?)\s*\/\s*10/g,
+  ];
+  let lastScore: number | null = null;
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const score = parseFloat(match[1].replace(',', '.'));
+      if (score >= 0 && score <= 10) {
+        lastScore = score;
+      }
+    }
+    if (lastScore !== null) return lastScore;
+  }
+  return lastScore;
+}
+
+const SCORING_MAX_ROUNDS = 10;
+const SCORING_THRESHOLD = 9;
+
+export async function runScoringLoop(pair: Pair, io: SocketServer): Promise<void> {
+  if (pair.left.messages.length === 0) throw new Error('No messages to analyze');
+
+  for (let round = 1; round <= SCORING_MAX_ROUNDS; round++) {
+    const roundStartTime = Date.now();
+
+    // Emit scoring round start
+    io.emit(`scoring:${pair.id}`, { round, score: null, elapsed: 0, verdict: 'running' });
+    io.emit(`loop:${pair.id}`, { round, total: SCORING_MAX_ROUNDS, phase: 'analyzing' });
+
+    // --- RIGHT: Analyze the full conversation ---
+    const conversationText = pair.left.messages.map(m => {
+      const label = m.role === 'user' ? 'UTILISATEUR' : 'EXPERT PRD';
+      return `[${label}]\n${m.content}`;
+    }).join('\n\n---\n\n');
+
+    const referencedFiles = extractReferencedFileContents(pair.left.messages, pair.projectDir, pair.annexDirs);
+
+    pair.status = 'analyzing';
+    pair.updatedAt = new Date().toISOString();
+    savePair(pair);
+    io.emit(`status:${pair.id}`, { status: 'analyzing' });
+
+    let loopPrompt = `[CONVERSATION PRD — Scoring Round ${round}]\n\n${conversationText}\n\n`;
+    if (referencedFiles) {
+      loopPrompt += `---\n\n[FICHIERS REFERENCES]\n\n${referencedFiles}\n\n`;
+    }
+    loopPrompt += `---\n\n[CONSIGNE]\nAnalyse le PRD en profondeur : points forts, points a ameliorer, problemes potentiels, manques.\nTu peux explorer le codebase pour verifier la coherence avec le code existant.\nNE CODE PAS.\n\nIMPORTANT: Termine TOUJOURS ton analyse par un score global sur 10 au format exact:\nScore final : X/10\n\nUn score >= 9/10 signifie que le PRD est pret pour l'implementation.`;
+
+    const analysisOutput = await new Promise<string>((resolve, reject) => {
+      callClaude({
+        cwd: pair.projectDir,
+        annexDirs: pair.annexDirs,
+        model: pair.right.agent.model,
+        systemPrompt: 'Tu es un analyste technique senior. Le PRD complet et les fichiers references te sont fournis dans le message. Analyse en profondeur. Tu peux explorer le codebase pour verifier la faisabilite. NE CODE PAS, ne modifie aucun fichier. Termine TOUJOURS par un score sur 10.',
+        useAppendSystemPrompt: false,
+        allowedTools: ['Read', 'Glob', 'Grep'],
+        prompt: loopPrompt,
+        pairId: pair.id,
+        socketEvent: `stream:right:${pair.id}`,
+        eventMeta: { phase: 'analysis' },
+        io,
+        onComplete: resolve,
+        onError: reject,
+      });
+    });
+
+    const analysisIndex = pair.right.analyses.length + 1;
+    pair.right.analyses.push({
+      index: analysisIndex,
+      prdVersion: pair.left.messages.filter(m => m.role === 'assistant').length,
+      output: analysisOutput,
+    });
+    saveRoundOutput(pair.id, 'right', `analysis-${analysisIndex}.md`, analysisOutput);
+
+    // Parse the score
+    const score = extractScore(analysisOutput);
+    const roundElapsed = Math.floor((Date.now() - roundStartTime) / 1000);
+
+    // Emit scoring result for this round
+    const isReady = score !== null && score >= SCORING_THRESHOLD;
+    io.emit(`scoring:${pair.id}`, {
+      round,
+      score,
+      elapsed: roundElapsed,
+      verdict: isReady ? 'ready' : (round === SCORING_MAX_ROUNDS ? 'max_rounds' : 'continue'),
+    });
+
+    // If score >= threshold, stop
+    if (isReady) {
+      pair.status = 'prd_done';
+      pair.updatedAt = new Date().toISOString();
+      savePair(pair);
+      io.emit(`status:${pair.id}`, { status: 'prd_done' });
+      io.emit(`loop:${pair.id}`, { round, total: round, phase: 'done' });
+      return;
+    }
+
+    // If max rounds, stop
+    if (round === SCORING_MAX_ROUNDS) {
+      pair.status = 'prd_done';
+      pair.updatedAt = new Date().toISOString();
+      savePair(pair);
+      io.emit(`status:${pair.id}`, { status: 'prd_done' });
+      io.emit(`loop:${pair.id}`, { round, total: round, phase: 'done' });
+      return;
+    }
+
+    // --- LEFT: Send analysis as feedback, get refined PRD ---
+    io.emit(`loop:${pair.id}`, { round, total: SCORING_MAX_ROUNDS, phase: 'refining' });
+
+    pair.status = 'chatting';
+    pair.updatedAt = new Date().toISOString();
+    savePair(pair);
+    io.emit(`status:${pair.id}`, { status: 'chatting' });
+
+    const feedbackMessage = {
+      id: `scoring-feedback-${round}-${Date.now()}`,
+      role: 'user' as const,
+      content: `[COMMENTAIRES DE L'ANALYSTE — Scoring Round ${round}, Score: ${score ?? 'N/A'}/10]\n\n${analysisOutput}\n\n[CONSIGNE]\nPrend en compte ces commentaires et produis une version amelioree du PRD. Integre les corrections demandees. L'objectif est d'atteindre un score >= 9/10.`,
+      timestamp: new Date().toISOString(),
+    };
+    pair.left.messages.push(feedbackMessage);
+    savePair(pair);
+
+    const refinedPrd = await new Promise<string>((resolve, reject) => {
+      callClaudeChat({
+        cwd: pair.projectDir,
+        annexDirs: pair.annexDirs,
+        model: pair.left.agent.model,
+        allowedTools: ['Read', 'Glob', 'Grep'],
+        prompt: feedbackMessage.content,
+        sessionId: pair.left.sessionId,
+        systemPrompt: pair.left.agent.systemPrompt,
+        pairId: pair.id,
+        io,
+        onComplete: (fullText, sessionId) => {
+          pair.left.sessionId = sessionId;
+          resolve(fullText);
+        },
+        onError: reject,
+      });
+    });
+
+    const assistantMessage = {
+      id: `scoring-refined-${round}-${Date.now()}`,
+      role: 'assistant' as const,
+      content: refinedPrd,
+      timestamp: new Date().toISOString(),
+    };
+    pair.left.messages.push(assistantMessage);
+    pair.updatedAt = new Date().toISOString();
+    savePair(pair);
+  }
+
+  pair.status = 'prd_done';
+  pair.updatedAt = new Date().toISOString();
+  savePair(pair);
+  io.emit(`status:${pair.id}`, { status: 'prd_done' });
+}
+
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }

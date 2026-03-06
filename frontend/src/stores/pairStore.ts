@@ -25,6 +25,10 @@ interface PairStore {
   loopTotal: number;
   loopPhase: 'analyzing' | 'refining' | 'done' | null;
 
+  // Scoring state
+  scoringActive: boolean;
+  scoringHistory: { round: number; score: number | null; elapsed: number; verdict: string }[];
+
   // Error state
   errorMessage: string | null;
   errorRetryable: boolean;
@@ -49,6 +53,7 @@ interface PairStore {
   pushLeft: (id: string) => Promise<void>;
   goCode: (id: string) => Promise<void>;
   autoLoop: (id: string, rounds: number) => Promise<void>;
+  scoringLoop: (id: string) => Promise<void>;
   uploadAttachment: (id: string, file: File, panel: 'left' | 'right') => Promise<void>;
   deleteAttachment: (id: string, attachmentId: string) => Promise<void>;
   setSearchQuery: (query: string) => void;
@@ -90,6 +95,8 @@ export const usePairStore = create<PairStore>((set, get) => ({
   loopRound: 0,
   loopTotal: 0,
   loopPhase: null,
+  scoringActive: false,
+  scoringHistory: [],
   errorMessage: null,
   errorRetryable: false,
   settings: { prdDir: '', defaultProjectDir: '', anthropicApiKey: '' },
@@ -143,6 +150,9 @@ export const usePairStore = create<PairStore>((set, get) => ({
           if (newStatus === 'prd_done' || newStatus === 'idle') {
             set({ leftStreamItems: [] });
           }
+          if (newStatus === 'error' || newStatus === 'stopped') {
+            set({ scoringActive: false });
+          }
           // macOS notification when a panel finishes
           if ('Notification' in window && Notification.permission === 'granted') {
             const pair = get().pairs.find(p => p.id === selectedId);
@@ -182,6 +192,33 @@ export const usePairStore = create<PairStore>((set, get) => ({
         }
       }
 
+      if (event === `scoring:${selectedId}`) {
+        const sd = data as unknown as { round: number; score: number | null; elapsed: number; verdict: string };
+        if (sd.verdict !== 'running') {
+          set(s => ({
+            scoringHistory: [...s.scoringHistory, { round: sd.round, score: sd.score, elapsed: sd.elapsed, verdict: sd.verdict }],
+          }));
+          // Notification per round
+          if ('Notification' in window && Notification.permission === 'granted') {
+            const pair = get().pairs.find(p => p.id === selectedId);
+            const scoreStr = sd.score !== null ? sd.score.toFixed(1) : '?';
+            const icon = sd.verdict === 'ready' ? '\u{1F7E2}' : sd.score !== null && sd.score >= 7 ? '\u{1F7E1}' : '\u{1F534}';
+            if (sd.verdict === 'ready') {
+              new Notification(`${icon} Round ${sd.round} — Score: ${scoreStr}/10 — PRD pret !`, {
+                body: `${pair?.name || 'Paire'} — ${sd.elapsed}s`,
+              });
+            } else {
+              new Notification(`${icon} Round ${sd.round} — Score: ${scoreStr}/10`, {
+                body: `${pair?.name || 'Paire'} — ${sd.elapsed}s`,
+              });
+            }
+          }
+          if (sd.verdict === 'ready' || sd.verdict === 'max_rounds') {
+            set({ scoringActive: false });
+          }
+        }
+      }
+
       if (event === `error:${selectedId}`) {
         set({ errorMessage: data.message || 'Unknown error', errorRetryable: data.retryable || false });
       }
@@ -215,6 +252,8 @@ export const usePairStore = create<PairStore>((set, get) => ({
       loopRound: 0,
       loopTotal: 0,
       loopPhase: null,
+      scoringActive: false,
+      scoringHistory: [],
       errorMessage: null,
     });
   },
@@ -298,6 +337,17 @@ export const usePairStore = create<PairStore>((set, get) => ({
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ rounds }),
     });
+  },
+
+  scoringLoop: async (id) => {
+    set({
+      leftStreamItems: [],
+      rightStreamItems: [], rightStreamPhase: 'analysis',
+      loopRound: 1, loopTotal: 10, loopPhase: 'analyzing',
+      scoringActive: true, scoringHistory: [],
+      errorMessage: null,
+    });
+    await fetch(`${API}/pairs/${id}/scoring`, { method: 'POST' });
   },
 
   uploadAttachment: async (id, file, panel) => {

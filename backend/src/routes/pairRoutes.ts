@@ -6,7 +6,7 @@ import multer from 'multer';
 import { Server as SocketServer } from 'socket.io';
 import { Pair, PairStatus, ChatMessage } from '../types/pair.js';
 import { savePair, deletePairFromDisk, getAttachmentsDir } from '../services/storageService.js';
-import { callClaudeChat, runAnalysis, runImplementation, runAutoLoop, getActiveProcesses, estimateTokens, extractReferencedFileContents } from '../services/claudeService.js';
+import { callClaudeChat, runAnalysis, runImplementation, runAutoLoop, runScoringLoop, getActiveProcesses, estimateTokens, extractReferencedFileContents } from '../services/claudeService.js';
 import { PRESETS } from '../services/presets.js';
 import { loadSettings, saveSettings } from '../services/settingsService.js';
 
@@ -360,6 +360,40 @@ export function createPairRoutes(pairs: Map<string, Pair>, io: SocketServer): Ro
     });
 
     res.json({ status: 'looping', rounds });
+  });
+
+  // POST /api/pairs/:id/scoring — auto-loop with score-based stop (>= 9/10)
+  router.post('/pairs/:id/scoring', (req: Request, res: Response) => {
+    const pair = pairs.get(paramId(req));
+    if (!pair) { res.status(404).json({ error: 'Pair not found' }); return; }
+
+    if (!['prd_done', 'done', 'error', 'stopped'].includes(pair.status)) {
+      res.status(409).json({ error: `Cannot start scoring in status: ${pair.status}` });
+      return;
+    }
+
+    const hasAssistant = pair.left.messages.some(m => m.role === 'assistant');
+    if (!hasAssistant) {
+      res.status(409).json({ error: 'No assistant response to score' });
+      return;
+    }
+
+    for (const [, p] of pairs) {
+      if (p.id !== pair.id && ['chatting', 'analyzing', 'coding'].includes(p.status)) {
+        res.status(409).json({ error: 'Another pair is already active' });
+        return;
+      }
+    }
+
+    runScoringLoop(pair, io).catch((err) => {
+      pair.status = 'error';
+      pair.updatedAt = new Date().toISOString();
+      savePair(pair);
+      io.emit(`status:${pair.id}`, { status: 'error' });
+      io.emit(`error:${pair.id}`, { message: String(err), retryable: true });
+    });
+
+    res.json({ status: 'scoring' });
   });
 
   // POST /api/pairs/:id/push-left — send latest analysis back to left chat
